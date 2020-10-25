@@ -1,0 +1,593 @@
+---
+title: "World Health Snapshot"
+author: Ekaterina Hymers
+date: "26 October 2020"
+output: 
+  flexdashboard::flex_dashboard:
+    source_code: embed
+runtime: shiny
+---
+
+```{r setup, include=FALSE}
+library(flexdashboard)
+library(tidyverse)
+library(tidyr)
+library(shiny)
+
+#Missing Values
+library(visdat)
+library(naniar)
+library(simputation)
+
+# World Map
+library(rgeos)
+library(ggmap)
+library(maps)
+library(rworldmap)
+
+# Formatting
+library(knitr)
+library(stringr)
+
+# Modelling
+library(broom)
+
+# Charts
+library(ggplot2)
+library(ggrepel)
+library(scales)
+library(gridExtra)
+library(plotly)
+
+# Health Nutrition and Population Statistics https://databank.worldbank.org/home.aspx
+hnps_path = "data/c4247170-1ec4-404e-b722-1c6041989e73_Data.csv"
+# World Development Indicators https://databank.worldbank.org/home.aspx
+gdp_path  = "data/e7254b7e-270a-4b46-8f7e-80ebe1920c32_Data.csv"
+# https://gist.github.com/tadast/8827699
+wcoords_path = "data/countries_codes_and_coordinates.csv"
+# https://gist.github.com/stevewithington/20a69c0b6d2ff846ea5d35e5fc47f26c
+conts_path = "data/country-and-continent-codes-list-csv.csv"
+
+# read in CSV files
+hnps <- read_csv(hnps_path)
+gdp <- read_csv(gdp_path)
+wcoords <-read_csv(wcoords_path)
+conts <-read_csv(conts_path)
+```
+
+
+Introduction
+=====================================  
+
+Data Wrangling {style="position:relative;"}
+=====================================  
+
+Column {.tabset .tabset-fade}
+-------------------------------------
+\
+\
+_The loaded data consists of four different data sets that need to be joined and cleaned up. Here we display the first several rows of each loaded data frame._
+
+### Health, Nutrition and Population Statistics
+\
+Health, Nutrition and Population Statistics table contains many health indicators per country and their respective values for each year. The dataset has been obtained from [The World Bank DataBank](https://databank.worldbank.org/home.aspx) where data from the last 20 years has been selected.
+
+```{r view-hnps}
+renderTable({head(hnps)})
+```
+
+### World Development Indicators
+\
+GDP values per country over the past 20 years have been obtained from the World Development Indicators table available at [The World Bank DataBank](https://databank.worldbank.org/home.aspx).
+
+```{r view-gdp}
+renderTable({head(gdp)})
+```
+
+### World Coordinates
+\
+Latitude and Longitude values per country have been obtained from [GitHub](https://gist.github.com/tadast/8827699).
+
+```{r view-wcoords}
+renderTable({head(wcoords)})
+```
+
+### World Continents
+\
+World Continent values and codes have been obtained from [GitHub](https://gist.github.com/stevewithington/20a69c0b6d2ff846ea5d35e5fc47f26c)
+
+```{r view-conts}
+renderTable({head(conts)})
+```
+
+Column
+-------------------------------------
+
+### Joining the Tables
+\
+The `year` column name in The World Bank data (Health, Nutrition and Population, and the GDP data frames) is written as YYYY [YRYYYY]. To simplify, we change these values to YYYY in both data frames.
+\
+\
+Subsequently, we join data from
+
+ 1. Health, Nutrition and Population data frame with GDP data frame 
+ 2. Country Coordinates table with Continents table
+ 3. Join everything together in a single `hnps` table.
+\
+
+```{r colnames}
+# Using one hnps table causes the latest version to appear in earlier Rows. Moving the data into versioned tables to make sure they display as expected.
+hnps_1 <- hnps
+gdp_1 <- gdp
+new_col_names <- str_replace_all(names(hnps_1)," \\[YR.*\\]", "")
+names(hnps_1) <- new_col_names
+names(gdp_1) <- new_col_names
+```
+
+
+```{r join}
+wcoords_1 <- left_join(wcoords,select(conts,"Three_Letter_Country_Code","Continent_Name"),by=c("Alpha-3 code"="Three_Letter_Country_Code"))
+hnps_1 <- full_join(hnps_1, gdp_1)
+hnps_1 <- left_join(hnps_1,wcoords_1,by=c("Country Code"="Alpha-3 code"))
+```
+
+\
+The resulting table  `glimpse` is as per bellow:
+\
+```{r, echo=TRUE}
+glimpse(hnps_1)
+```
+
+
+### Wrangling Data
+\
+We further modify the table to rename values such as `..` to `NA`, rename columns with long names to shorter equivalents, remove unnecessary columns using `select` function, and use `gather` function to make sure the year is a row value rather than a column name so that we can analyze it later. 
+\
+\
+```{r wrangle-table}
+hnps_2 <- hnps_1
+
+# The NA values in the table are written as "..", replace those with NA
+hnps_2[hnps_2==".."] <- NA
+
+# Place year into a column called Year
+hnps_2 <- gather(hnps_2, key="year", value="value", "2001":"2020")
+
+# Remove the extra columns introduced from world coordinates dataset
+hnps_2 <- select(hnps_2,-Country,-'Alpha-2 code',-'Numeric code')
+
+# Rename columns into easy to use names
+hnps_2 <- rename(hnps_2,country="Country Name", country_code="Country Code", series="Series Name", series_code="Series Code",lat="Latitude (average)", lon="Longitude (average)",continent="Continent_Name")
+
+# Make the value numeric
+hnps_2$value <- as.numeric(hnps_2$value)
+```
+\
+The resulting table `glimpse` is as per bellow:
+\
+```{r glimpse-table, echo=TRUE}
+glimpse(hnps_2)
+```
+
+Data Missingness {style="position:relative;"}
+===================================== 
+
+Column
+-------------------------------------
+
+### Initial Missingness Analysis
+\
+\
+The `hnps` table is quite large as a result of various joins, and contains 2,341,720 observations in total. We check for missingness using `vis_dat` function. This shows us that there are a number of values missing for continent, latitude, longitude, and value.
+\
+
+```{r missing_data}
+hnps_3 <- hnps_2
+```
+```{r}
+renderPlot({print(vis_dat(hnps_3, warn_large_data=FALSE))})
+```
+
+### Resulting Missingness Analysis
+\
+\
+After further wranging the dataset, missing analysis result is as per bellow plot. Read bellow for details of how the Health, Nutrition and Population dataset was amended to be used in the analysis.
+\
+Resulting missingness analysis shows only a few series missing data that will be imputed using `impute_mean` function. 
+\
+
+```{r fix-missingness}
+# Latitude and Longitude
+h_miss <- hnps_3 %>% group_by(country) %>% miss_summary() %>% ungroup()
+df_miss_country <- data.frame(h_miss$miss_var_summary)
+
+hnps_3 <- filter(hnps_3, country_code %in% wcoords$`Alpha-3 code`)
+
+#Countries with little data
+h_miss <- hnps_3 %>% group_by(country) %>% miss_summary() %>% ungroup()
+df_miss_country <- data.frame(h_miss$miss_var_summary)
+df_miss_country <- df_miss_country %>% filter(pct_miss>80 & variable=="value") %>% select(country,pct_miss)
+
+hnps_3 <- filter(hnps_3, !(country %in% df_miss_country$country))
+
+#Categories with limited data
+h_miss <- hnps_3 %>% group_by(series) %>% miss_summary() %>% ungroup()
+df_miss_series <- data.frame(h_miss$miss_var_summary)
+df_miss_series <- df_miss_series %>% filter(pct_miss>80 & variable=="value") %>% select(series, pct_miss)
+
+hnps_3 <- filter(hnps_3, !(series %in% df_miss_series$series))
+
+h_miss <- hnps_3 %>% group_by(year) %>% miss_summary() %>% ungroup()
+df_miss_year <- data.frame(h_miss$miss_var_summary)
+df_miss_year <- df_miss_year %>% filter(pct_miss > 80 & variable=="value") %>% select(year, pct_miss)
+
+hnps_3 <- filter(hnps_3, !(year %in% df_miss_year$year))
+
+# Continent Duplication
+hnps_3 <- distinct(hnps_3)
+double_conts <- hnps_3 %>% select(country,continent) %>% distinct() %>% group_by(country) %>% summarise(total = n()) %>% filter(total > 1)
+hnps_3 <- mutate(hnps_3,continent = if_else(country %in% double_conts$country,"Eurasia",continent)) %>% distinct()
+
+# Select only necessary series
+select_series <- c("Population, male", "Population, female", "GDP per capita (current US$)", "Current health expenditure per capita (current US$)", "Out-of-pocket expenditure per capita (current US$)", "Mortality rate, under-5 (per 1,000)", "Mortality rate, neonatal (per 1,000 live births)", "Mortality rate, infant (per 1,000 live births)","Mortality rate, adult, female (per 1,000 female adults)","Mortality rate, adult, male (per 1,000 male adults)","Physicians (per 1,000 people)")
+
+hnps_tidy <- filter(hnps_3, series %in% select_series) %>% select(-series_code) %>%
+  spread(key = series, value = value) %>%
+  rename(pop_m="Population, male", pop_f="Population, female", gdp="GDP per capita (current US$)", health_expend="Current health expenditure per capita (current US$)", oop_expend="Out-of-pocket expenditure per capita (current US$)", mortality_under5="Mortality rate, under-5 (per 1,000)", mortality_neonatal="Mortality rate, neonatal (per 1,000 live births)", mortality_infant="Mortality rate, infant (per 1,000 live births)",mortality_adult_f="Mortality rate, adult, female (per 1,000 female adults)",mortality_adult_m="Mortality rate, adult, male (per 1,000 male adults)",physicians="Physicians (per 1,000 people)")
+
+# Further missing data analysis showed that data on physicians was missing. Removing physicians
+hnps_tidy <- select(hnps_tidy, -physicians)
+
+# Removing countries that have more than 80% of required data missing
+countries_to_remove <- hnps_tidy %>% group_by(country) %>% miss_var_summary() %>% filter(pct_miss == 100) %>% summarise(missing_var = n()/8*100) 
+hnps_tidy <- filter(hnps_tidy,!(country %in% countries_to_remove$country))
+
+# Removing years where all the necessary data is missing
+years_to_remove <- hnps_tidy %>% group_by(year) %>% miss_var_summary() %>% filter(pct_miss == 100)
+hnps_tidy <- filter(hnps_tidy, !(year %in% years_to_remove$year))
+```
+
+```{r render-final-visdat}
+renderPlot({print(vis_dat(hnps_tidy, warn_large_data=FALSE))})
+```
+
+
+Column
+-------------------------------------
+
+### Processing Missingness
+_See "Source Code" to view how missing values were removed._
+\
+\
+**Latitude and Longitude**
+\
+We first checked if our coordinates table mergers mapped all the required latitude and longitude values. Examining where the values are missing, latitude and longitude values are mostly missing from country values that don't appear to represent an actual country, but an area, or a grouping of countries, e.g. _Arab World_, and _East Asia & Pacific_. There are also values such as _Early-demongraphic divident_ and _High Income_. Those country categories are not necessary for our analysis and we can't map latitude and longitude to them. These have been filtered out.
+\
+\
+**Countries with little data**
+\
+Next, we analyzed if any countries are low on required data. We noticed that quite a few had more than 80% of data missing. As there is such a large amount of data missing, these countries were removed from analysis. 
+\
+\
+**Continent Duplication**
+\
+Running several wrangling functions, such as spread by series, has also highlighted evidence of double-entry in some data. In particular, some countries such as `Russia`, `Kazakhstan`,`Azeibarjan` were found to belong to two continents - `Europe` and `Asia`. To rectify we removed duplicates using `distinct` function and also mutated countries belonging to both Europe and Asia to belong to a combined continent - `Eurasia`.
+\
+\
+**Categories with limited data**
+\
+The Health Nutrition and Population dataset, and the GDP dataset contain many time series categories. In this analysis, we will only be using a few of interest. To clean up the dataset further, we check if any of the series have more than 80% of data missing. We removed the series that have more than 80% of data missing. 
+\
+\
+**Years with limited data**
+\
+Lastly this is a time series data set, and we wish to check if any of the years have too much data missing. We removed the years that have more than 80% of the data missing.
+\
+\
+**Tidying the Remaining Data**
+\
+The intent of this analysis is to analyse health expenditure, gdp, and mortality rates within different countries over the last 20 years. There are many series categories in our dataset, and we only need those relevant to what we wish to analyze:
+
+* Population
+* GDP per Capita
+* Health Expenditure per Capita
+* Mortality rates among different population segments
+* Out of Pocket expenditure on Health
+\
+\
+There are 305 series categories in total, and our dataset is still at 1,114,768 observations. Hence, further steps were taken to filter out unnecessary data and shrink the data only to required categories, as well as years and countries that contain enough data in those categories. 
+\
+\
+Lastly, we spread the remaining series values into columns to use these in further analysis.
+\
+\
+`glimpse` of the resulting table is bellow:
+```{r glimpse-final-dataset, echo=TRUE}
+glimpse(hnps_tidy)
+```
+
+Health Analysis
+===================================== 
+
+Inputs {.sidebar}
+-------------------------------------
+
+```{r health-analysis-sidebar-year}
+minYear <- min(as.numeric(hnps_tidy$year))
+maxYear <- max(as.numeric(hnps_tidy$year))
+sliderInput('yearSelect', label=h3("Year"), min=minYear, max=maxYear,
+            value=minYear, step=1, round=0)
+```
+_Slide the cursor to view changes in data over the years._
+\
+\
+```{r health-analysis-sidebar-country}
+countries <- append('All Countries',hnps_tidy$country)
+
+selectInput("countrySelect", label = h3("Country"), 
+    choices = countries, 
+    selected = "All Countries")
+```
+_Select a specific country, or All Countries._
+\
+\
+```{r health-analysis-sidebar-series}
+inputs <- list("Govt. Health Expenditure","Out-of-Pocket Expenditure", "Adult Mortality", "Under-5yo Mortality")
+
+selectInput("seriesSelect", label = h3("Health Series"), 
+    choices = inputs, 
+    selected = "Govt. Health Expenditure")
+```
+_Select a Health Series to analyse._
+
+```{r series-function}
+# list = add selected series, max limit for charts, chart label, and midpoint for colour-coding
+hnps_reactive <- reactive({
+  if(input$seriesSelect == "Govt. Health Expenditure")
+    list(hnps_tidy %>% mutate(selected_series = health_expend),
+    11000,
+    "Health Spend per Capita in US$",
+    5000)
+  
+  else if(input$seriesSelect == "Out-of-Pocket Expenditure")
+    list(hnps_tidy %>% mutate(selected_series = oop_expend),
+    3000,
+    "Out Of Pocket Health Spend in US$",
+    500)
+  
+  else if(input$seriesSelect == "Adult Mortality")
+    list(hnps_tidy %>% mutate(selected_series = (mortality_adult_f+mortality_adult_m)/2),
+    620,
+    "Mortality per 1000 people",
+    250)
+  
+  else if(input$seriesSelect == "Under-5yo Mortality")
+    list(hnps_tidy %>% mutate(selected_series = mortality_under5),
+    220,
+    "Mortality per 1000 people",
+    60)
+})
+
+```
+
+
+Outputs
+-------------------------------------
+### Series vs Population and GDP
+```{r hnps-scatter-plot}
+
+renderPlotly({
+  p1 <- hnps_reactive()[[1]] %>% group_by(year,country,gdp,selected_series) %>% impute_mean_at(.vars = vars(gdp,selected_series)) %>% 
+  summarize(pop_total = sum(pop_f,pop_m,rm.na=TRUE)/1000000)
+  
+  if(input$countrySelect == "All Countries")
+    p1 <- p1 %>% filter(year==input$yearSelect)
+  else
+    p1 <- p1 %>% filter(year==input$yearSelect, country==input$countrySelect)
+      
+  p1 <- p1 %>% ggplot(aes(x=gdp,y=pop_total,group=country,colour=country)) +  
+    geom_point(aes(size=selected_series)) + 
+    facet_wrap(~year) + 
+    labs(y = "Population in Millions", x="GDP per Capita in US$", size=hnps_reactive()[[3]]) + 
+    guides(colour=FALSE) + 
+    scale_x_continuous(labels = dollar, breaks = c(0,20000,40000,60000,80000)) + 
+    xlim(0,120000) + ylim(0,1500)
+  
+  print(p1)
+})
+```
+
+
+### Series on the World Map
+```{r world-map}
+
+worldmap <- get_map(location = c(lon = 0, lat = 0), zoom=1, color = "bw", source="google")
+
+renderPlot({
+  if(input$countrySelect == "All Countries")
+    hnps_map <- hnps_reactive()[[1]] %>% filter(year==input$yearSelect)
+  else
+    hnps_map <- hnps_reactive()[[1]] %>% filter(year==input$yearSelect, country==input$countrySelect)
+  
+  m1 <- ggmap(worldmap) + 
+    scale_y_continuous(limits=c(-55.0, 75.0)) + 
+    scale_x_continuous(limits=c(-160.0, 180.0)) +
+    geom_point(data=hnps_map,aes(x=lon,y=lat,size=selected_series, colour=selected_series)) +
+    guides(size=FALSE) + 
+    labs(colour=hnps_reactive()[[3]]) +
+    scale_colour_gradient2(low="blue", mid="green", high="yellow",midpoint = hnps_reactive()[[4]])
+  
+  print(m1)
+  })
+```
+
+Outputs
+-------------------------------------
+### Series vs GDB Per Capita
+```{r input-gdp}
+
+renderPlotly({
+  p2 <- hnps_reactive()[[1]] %>% group_by(year,country,gdp,selected_series) %>% impute_mean_at(.vars = vars(gdp,selected_series))
+  
+  if(input$countrySelect == "All Countries")
+    p2 <- p2 %>% filter(year==input$yearSelect)
+  else
+    p2 <- p2 %>% filter(year==input$yearSelect, country==input$countrySelect)
+      
+  p2 <- p2 %>% ggplot(aes(x=gdp,y=selected_series)) + 
+    geom_point(aes(colour=country)) + 
+    geom_smooth() + 
+    facet_wrap(~year) + 
+    labs(x = "GDP per Capita in US$", y=hnps_reactive()[[3]]) +
+    xlim(0,120000) + ylim(0,hnps_reactive()[[2]])
+  
+  print(p2)
+})
+
+```
+
+### Series vs Population
+```{r input-population}
+
+renderPlotly({
+  p3 <- hnps_reactive()[[1]] %>% group_by(year,country,selected_series) %>% impute_mean_at(.vars = vars(gdp,selected_series)) %>%
+    summarize(pop_total = sum(pop_f,pop_m,rm.na=TRUE)/1000000)
+  
+  if(input$countrySelect == "All Countries")
+    p3 <- p3 %>% filter(year==input$yearSelect)
+  else
+    p3 <- p3 %>% filter(year==input$yearSelect, country==input$countrySelect)
+      
+  p3 <- p3 %>% ggplot(aes(x=pop_total,y=selected_series)) + 
+    geom_point(aes(colour=country)) + 
+    geom_smooth() + 
+    facet_wrap(~year) + 
+    labs(x = "Population in Millions", y=hnps_reactive()[[3]]) +
+    xlim(0,1500) + ylim(0,hnps_reactive()[[2]])
+  
+  print(p3)
+})
+
+```
+
+Health Modeling
+=====================================  
+Inputs {.sidebar}
+-------------------------------------
+
+```{r health-model-sidebar-year}
+minYear <- min(as.numeric(hnps_tidy$year))
+maxYear <- max(as.numeric(hnps_tidy$year))
+sliderInput('yearModSelect', label=h3("Year"), min=minYear, max=maxYear,
+            value=minYear, step=1, round=0)
+```
+_Slide the cursor to view changes in data over the years._
+
+Outputs
+-------------------------------------
+### Modelling Under 5 Mortality response against Health Expenditure - All Countries
+
+```{r}
+renderPlotly({
+  hnps_lm <- lm(mortality_under5~health_expend + log(health_expend) + I(health_expend^0.2), data=hnps_tidy)
+  hnps_mod <- augment(hnps_lm)
+  p4 <- hnps_mod %>% 
+    ggplot(aes(x=health_expend, y=mortality_under5)) +
+    geom_point() + 
+    geom_line(aes(y=.fitted), color="red")
+  
+  print(p4)
+})
+
+```
+
+### Residuals - All Countries
+```{r}
+renderPlotly({
+  hnps_lm <- lm(mortality_under5~health_expend + log(health_expend) + I(health_expend^0.2), data=hnps_tidy)
+  hnps_mod <- augment(hnps_lm)
+  p5 <- hnps_mod %>% 
+    ggplot(aes(x=health_expend, y=.resid)) + geom_line()
+  
+  print(p5)
+})
+```
+
+### R-Squared
+```{r}
+renderText({
+  hnps_lm <- lm(mortality_under5~health_expend + log(health_expend) + I(health_expend^0.2), data=hnps_tidy)
+  print(summary(hnps_lm)$r.squared)
+})
+```
+
+
+Outputs
+-------------------------------------
+### Modelling Under 5 Mortality response against Health Expenditure - Per Country
+
+```{r}
+renderPlot({
+  hnps_lm <- lm(mortality_under5~health_expend + log(health_expend) + I(health_expend^0.2) + country, data=hnps_tidy)
+  hnps_mod <- augment(hnps_lm)
+  p6 <- hnps_mod %>% 
+    ggplot(aes(x=health_expend, y=mortality_under5)) +
+    geom_point(aes(colour=country)) + 
+    geom_line(aes(y=.fitted,color=country,group=country)) +
+    theme(legend.position = "none")
+  
+  print(p6)
+})
+
+```
+
+### Residuals - Per Country
+```{r}
+renderPlot({
+  hnps_lm <- lm(mortality_under5~health_expend + log(health_expend) + I(health_expend^0.2) + country, data=hnps_tidy)
+  hnps_mod <- augment(hnps_lm)
+  p7 <- hnps_mod %>% 
+    ggplot(aes(x=health_expend, y=.resid, colour=country,group=country)) + geom_line() +
+    theme(legend.position = "none")
+  
+  print(p7)
+})
+```
+
+### R-Squared
+```{r}
+renderText({
+  hnps_lm <- lm(mortality_under5~health_expend + log(health_expend) + I(health_expend^0.2) + country, data=hnps_tidy)
+  print(summary(hnps_lm)$r.squared)
+})
+```
+
+Data Ethics
+=====================================  
+
+
+
+Column {data-width=650}
+-----------------------------------------------------------------------
+
+### Chart A
+
+```{r}
+
+```
+
+Column {data-width=350}
+-----------------------------------------------------------------------
+
+### Chart B
+
+```{r}
+
+```
+
+### Chart C
+
+```{r}
+
+```
+
